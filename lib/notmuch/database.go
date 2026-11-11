@@ -208,6 +208,9 @@ func (db *Database) FindMessageByID(id string) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
+	if msg == nil {
+		return Message{}, fmt.Errorf("couldn't find message by id: %s", id)
+	}
 	message := Message{
 		message: msg,
 	}
