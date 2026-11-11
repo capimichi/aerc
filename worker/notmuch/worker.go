@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"git.sr.ht/~rjarry/aerc/config"
@@ -46,6 +47,7 @@ type worker struct {
 	store               *lib.MaildirStore
 	maildirAccountPath  string
 	db                  *notmuch.DB
+	dbLock              *sync.Mutex
 	setupErr            error
 	watcher             watchers.FSWatcher
 	watcherDebounce     *time.Timer
@@ -83,7 +85,9 @@ func (w *worker) Run() {
 		select {
 		case action := <-w.w.Actions():
 			msg := w.worker.ProcessAction(action)
-			err := w.handleMessage(msg)
+			err := w.withDBLock(func() error {
+				return w.handleMessage(msg)
+			})
 			switch {
 			case errors.Is(err, types.ErrNoop):
 				// Operation did not have any effect.
@@ -113,7 +117,7 @@ func (w *worker) Run() {
 				}, nil)
 			}
 		case <-w.nmStateChange:
-			err := w.handleNotmuchEvent()
+			err := w.withDBLock(w.handleNotmuchEvent)
 			if err != nil {
 				w.w.Errorf("notmuch event failure: %v", err)
 			}
@@ -224,6 +228,13 @@ func (w *worker) handleConfigure(msg *types.Configure) error {
 	excludedTags := w.loadExcludeTags(msg.Config)
 	profile := strings.TrimPrefix(msg.Config.Source, "notmuch://")
 	w.db = notmuch.NewDB(profile, excludedTags)
+	// Workers of accounts sharing the same database must not access it
+	// concurrently, see dbLocks. If the database cannot be opened here,
+	// the error will be reported by the first operation.
+	if w.db.Connect() == nil {
+		w.dbLock = dbLockFor(w.db.Path())
+		w.db.Close()
+	}
 
 	if msg.Config.Params["enable-maildir"] != "false" {
 		if err = w.db.Connect(); err != nil {
